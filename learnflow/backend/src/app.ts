@@ -7,6 +7,7 @@ import pinoHttp from "pino-http";
 
 import { chatRouter } from "./routes/chat.route";
 import { assignmentRouter } from "./routes/assignment.route";
+import { progressRouter } from "./routes/progress.route";
 import { logger } from "./utils/logger";
 
 export class HttpError extends Error {
@@ -34,7 +35,7 @@ export const createApp = () => {
     })
   );
 
-  app.use(helmet());
+  app.use(helmet() as express.RequestHandler);
 
   app.use(
     cors({
@@ -50,7 +51,7 @@ export const createApp = () => {
   );
 
   app.use(compression());
-  app.use(express.json({ limit: "1mb" }));
+  app.use(express.json({ limit: "1mb" }) as express.RequestHandler);
 
   app.use(
     rateLimit({
@@ -65,6 +66,7 @@ export const createApp = () => {
 
   app.use("/api/chat", chatRouter);
   app.use("/api/assignment", assignmentRouter);
+  app.use("/api/progress", progressRouter);
 
   app.use((_req, _res, next) => {
     next(new HttpError(404, "Not found"));
