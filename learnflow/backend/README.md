@@ -70,6 +70,32 @@ Evaluate request:
 }
 ```
 
+## Dashboard (Phase 8)
+
+All dashboard endpoints are **read-only** and return **anonymized, aggregated** metrics.
+
+### Role-based access (simple header RBAC)
+
+- Teachers: `x-role: teacher`
+- Institutions/auditors: `x-role: institution`
+
+### Optional anonymous user/session header (recommended)
+
+To get accurate active-student counts and depth progression trends, send a pseudonymous identifier:
+
+- `x-anon-student-id: <random-id>` (recommended)
+
+The backend hashes this value using `ANONYMIZATION_SALT` before writing telemetry.
+
+### Endpoints
+
+- `GET /api/dashboard/teacher?period=day|week|month`
+- `GET /api/dashboard/institution?period=day|week|month`
+- `GET /api/dashboard/metrics/:period`
+- `GET /api/dashboard/topic/:topicName?period=day|week|month`
+- `GET /api/dashboard/system-health`
+- `GET /api/dashboard/ethics-report?period=day|week|month`
+
 ## Production build
 
 ```bash
