@@ -7,6 +7,9 @@ import pinoHttp from "pino-http";
 
 import { chatRouter } from "./routes/chat.route";
 import { assignmentRouter } from "./routes/assignment.route";
+import { dashboardRouter } from "./routes/dashboard.route";
+import { systemMonitor } from "./dashboard/systemMonitor";
+import { telemetryStore } from "./dashboard/telemetryStore";
 import { logger } from "./utils/logger";
 
 export class HttpError extends Error {
@@ -61,10 +64,39 @@ export const createApp = () => {
     })
   );
 
+  app.use((req, res, next) => {
+    const start = process.hrtime.bigint();
+
+    res.on("finish", () => {
+      const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
+      const url = req.originalUrl;
+
+      const module = url.startsWith("/api/chat")
+        ? "chat"
+        : url.startsWith("/api/assignment")
+          ? "assignment"
+          : url.startsWith("/api/dashboard")
+            ? "dashboard"
+            : url.startsWith("/health")
+              ? "health"
+              : "other";
+
+      systemMonitor.recordRequest({
+        timestamp: Date.now(),
+        durationMs,
+        status: res.statusCode,
+        module
+      });
+    });
+
+    next();
+  });
+
   app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
 
   app.use("/api/chat", chatRouter);
   app.use("/api/assignment", assignmentRouter);
+  app.use("/api/dashboard", dashboardRouter);
 
   app.use((_req, _res, next) => {
     next(new HttpError(404, "Not found"));
@@ -75,6 +107,19 @@ export const createApp = () => {
 
     if (err instanceof HttpError) {
       req.log.warn({ err, requestId }, "request_error");
+
+      if (err.status >= 500) {
+        void telemetryStore
+          .record({
+            kind: "system_error",
+            timestamp: new Date().toISOString(),
+            endpoint: req.originalUrl,
+            status: err.status,
+            message: err.message
+          })
+          .catch(() => undefined);
+      }
+
       return res.status(err.status).json({
         ok: false,
         error: {
@@ -86,6 +131,17 @@ export const createApp = () => {
     }
 
     req.log.error({ err, requestId }, "unhandled_error");
+
+    void telemetryStore
+      .record({
+        kind: "system_error",
+        timestamp: new Date().toISOString(),
+        endpoint: req.originalUrl,
+        status: 500,
+        message: "Internal server error"
+      })
+      .catch(() => undefined);
+
     return res.status(500).json({
       ok: false,
       error: {

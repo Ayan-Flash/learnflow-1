@@ -13,8 +13,26 @@ import {
 import { createGeminiClientFromEnv } from "../ai/geminiClient";
 import { clarityScore, depthAlignmentScore } from "../evaluation/metricsCalculator";
 import { experimentLogger } from "../evaluation/experimentLogger";
+import { telemetryStore } from "../dashboard/telemetryStore";
 
 const PROMPT_VERSION = "learnflow-chat-v1";
+
+const getActorHashFromRequest = (req: Request): string | undefined => {
+  const raw =
+    req.header("x-anon-student-id") ?? req.header("x-student-id") ?? req.header("x-session-id") ?? undefined;
+  return raw ? telemetryStore.anonymizeActorId(raw) : undefined;
+};
+
+const detectPrivacyIssue = (text: string): string | null => {
+  const email = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+  const phone = /\b(?:\+?\d{1,3}[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b/;
+  const ssn = /\b\d{3}-\d{2}-\d{4}\b/;
+
+  if (email.test(text)) return "email";
+  if (phone.test(text)) return "phone";
+  if (ssn.test(text)) return "ssn";
+  return null;
+};
 
 const chatRequestSchema = z.object({
   message: z.string().min(1).max(12_000),
@@ -61,6 +79,20 @@ export const chatController = {
     const depthLevel: DepthLevel = normalizeDepthLevel(parsedBody.data.depth_level);
     const depth = getDepthConfig(depthLevel);
 
+    const actorHash = getActorHashFromRequest(req);
+
+    const privacyDetector = detectPrivacyIssue(parsedBody.data.message);
+    if (privacyDetector) {
+      await telemetryStore.record({
+        kind: "privacy",
+        timestamp: new Date().toISOString(),
+        actor_hash: actorHash,
+        type: "privacy_alert",
+        endpoint: "/api/chat",
+        detector: privacyDetector
+      });
+    }
+
     const ethics = assessEthics(parsedBody.data.message, mode);
 
     if (!ethics.allow_model_call) {
@@ -69,6 +101,8 @@ export const chatController = {
       const outputText = safeAnswer;
       const depthScore = depthAlignmentScore(depth, outputText);
       const clarity = clarityScore(outputText);
+
+      const ts = new Date().toISOString();
 
       experimentLogger.logInteraction({
         prompt_version: PROMPT_VERSION,
@@ -80,7 +114,44 @@ export const chatController = {
         depth_alignment_score: depthScore,
         clarity_score: clarity,
         ethics_flags: ethics.flags,
-        timestamp: new Date().toISOString()
+        timestamp: ts
+      });
+
+      if (ethics.flags.includes("cheating_intent") || ethics.flags.includes("explicit_request_final_answer")) {
+        await telemetryStore.record({
+          kind: "ethics",
+          timestamp: ts,
+          actor_hash: actorHash,
+          type: "cheating_detected",
+          endpoint: "/api/chat",
+          flags: ethics.flags
+        });
+      }
+
+      await telemetryStore.record({
+        kind: "ethics",
+        timestamp: ts,
+        actor_hash: actorHash,
+        type: "assignment_enforced",
+        endpoint: "/api/chat",
+        flags: ethics.flags
+      });
+
+      await telemetryStore.record({
+        kind: "interaction",
+        timestamp: ts,
+        actor_hash: actorHash,
+        endpoint: "/api/chat",
+        mode,
+        depth_level: depthLevel,
+        prompt_version: PROMPT_VERSION,
+        model_called: false,
+        input_tokens: 0,
+        output_tokens: 0,
+        depth_alignment_score: depthScore,
+        clarity_score: clarity,
+        ethics_flags: ethics.flags as EthicsFlag[],
+        redacted: true
       });
 
       return res.status(200).json({
@@ -116,6 +187,29 @@ export const chatController = {
     });
 
     const guardedPrompt = guardPromptForEthics(prompt, mode, ethics);
+
+    const promptModified = guardedPrompt !== prompt;
+    if (promptModified) {
+      await telemetryStore.record({
+        kind: "ethics",
+        timestamp: new Date().toISOString(),
+        actor_hash: actorHash,
+        type: "prompt_modified",
+        endpoint: "/api/chat",
+        flags: ethics.flags
+      });
+    }
+
+    if (ethics.flags.includes("cheating_intent") || ethics.flags.includes("explicit_request_final_answer")) {
+      await telemetryStore.record({
+        kind: "ethics",
+        timestamp: new Date().toISOString(),
+        actor_hash: actorHash,
+        type: "cheating_detected",
+        endpoint: "/api/chat",
+        flags: ethics.flags
+      });
+    }
 
     let gemini;
     try {
@@ -167,6 +261,8 @@ export const chatController = {
     const depthScore = depthAlignmentScore(depth, outputTextForScoring);
     const clarity = clarityScore(outputTextForScoring);
 
+    const ts = new Date().toISOString();
+
     experimentLogger.logInteraction({
       prompt_version: PROMPT_VERSION,
       depth_level: depthLevel,
@@ -177,7 +273,35 @@ export const chatController = {
       depth_alignment_score: depthScore,
       clarity_score: clarity,
       ethics_flags: ethics.flags as EthicsFlag[],
-      timestamp: new Date().toISOString()
+      timestamp: ts
+    });
+
+    if (mode === "Assignment Help" && post.redacted) {
+      await telemetryStore.record({
+        kind: "ethics",
+        timestamp: ts,
+        actor_hash: actorHash,
+        type: "assignment_enforced",
+        endpoint: "/api/chat",
+        flags: ethics.flags
+      });
+    }
+
+    await telemetryStore.record({
+      kind: "interaction",
+      timestamp: ts,
+      actor_hash: actorHash,
+      endpoint: "/api/chat",
+      mode,
+      depth_level: depthLevel,
+      prompt_version: PROMPT_VERSION,
+      model_called: true,
+      input_tokens: usage.input_tokens,
+      output_tokens: usage.output_tokens,
+      depth_alignment_score: depthScore,
+      clarity_score: clarity,
+      ethics_flags: ethics.flags as EthicsFlag[],
+      redacted: post.redacted
     });
 
     return res.status(200).json({
